@@ -1,2 +1,2 @@
 # Outdoor_Light_Controller
-outdoor light controller with intelligence to read the day lighr or human movement and stays On based on the timer settings  running on 8pin AVR controllers
+outdoor light controller with intelligence to read the day light and/or human movement and/or stays ON based on the timer setting all these running on a 8pin AVR controller with very few parts connected to it
