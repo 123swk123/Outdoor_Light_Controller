@@ -33,21 +33,34 @@
 
 #define TIMER_INC_IN_HRS  2
 #define TIMER_MAX         12
-#define TIMER_INC_STEPS   (TIMER_MAX/TIMER_INC_IN_HRS)
+#define TIMER_INC_STEPS   ((TIMER_MAX/TIMER_INC_IN_HRS) - 1)
 #define TIMER_NOOF_SECS_IN_1HR  3612/*(3600 / 0.99669)*/
 
 #define TIMER_ADC_STEPS   (1023 / TIMER_INC_STEPS)
 
-#define TIMEOUT_IN_SECS (((gu16TimerValue / TIMER_ADC_STEPS) + 1) * TIMER_INC_IN_HRS * TIMER_NOOF_SECS_IN_1HR)
+#define TIMEOUT_IN_SECS (((gu16Timer_Value / TIMER_ADC_STEPS) + 1) * TIMER_INC_IN_HRS * TIMER_NOOF_SECS_IN_1HR)
 
 #define OUTPUT_PIN  PORTB0
 
-#define INPUT_LDR_DARK_MAX  200
+#define INPUT_LDR_DARK_MAX  300
 #define INPUT_LDR_BRIGHT_MIN  30
 
+#define INPUT_LDR_CHG_VALUE 20
+#define INPUT_LDR_CHG_VALUE_POS (1 * INPUT_LDR_CHG_VALUE)
+#define INPUT_LDR_CHG_VALUE_NEG (-1 * INPUT_LDR_CHG_VALUE)
+
+typedef enum
+{
+  Sig_No_Chg,
+  Sig_Rising,
+  Sig_Falling
+}SIG_LEVEL_CHG;
+
 volatile uint16_t gu16CurrTimeInSecs = 0;
-volatile uint16_t gu16LDRValue = 0;
-volatile uint16_t gu16TimerValue = 0;
+volatile uint16_t gu16LDR_Value = 0;
+volatile uint16_t gu16LDR_T_minus_60_Value = 0;
+volatile uint16_t gu16LDR_T_minus_0_Value = 0;
+volatile uint16_t gu16Timer_Value = 0;
 
 // Timer 0 overflow interrupt service routine
 #ifdef __CODEVISIONAVR__
@@ -56,10 +69,19 @@ interrupt [TIM0_OVF] void timer0_ovf_isr(void)
 ISR(TIM0_OVF_vect)
 #endif
 {
-  // Reinitialize Timer 0 value
+  static uint8_t u8_Minute_Counter = 59;
+
   TCNT0=0x6E;
+  
   gu16CurrTimeInSecs++;
 
+  u8_Minute_Counter--;
+  if (u8_Minute_Counter == 0)
+  {
+    u8_Minute_Counter = 59;
+    gu16LDR_T_minus_60_Value = gu16LDR_T_minus_0_Value;
+    gu16LDR_T_minus_0_Value = gu16LDR_Value;
+  }
 }
 
 // Bandgap Voltage Reference: Off
@@ -77,13 +99,13 @@ ISR(ADC_vect)
   
   if (bWhich_ADC_Ch)
   {
-    gu16TimerValue = ADCW;
+    gu16Timer_Value = ADCW;
     ADMUX = 3;
     bWhich_ADC_Ch = 0;
   } 
   else
   {
-    gu16LDRValue = ADCW;
+    gu16LDR_Value = ADCW;
     ADMUX = 0;
     bWhich_ADC_Ch = 1;
   }
@@ -100,15 +122,22 @@ void Output_State_On(void)
 {
   PORTB |= (1 << OUTPUT_PIN);
   gu16CurrTimeInSecs = 0;
+
+  gu16LDR_T_minus_0_Value = gu16LDR_T_minus_60_Value = 0xFFFF;
 }
 
 void Output_State_Off(void)
 {
   PORTB &= ~(1 << OUTPUT_PIN);
+
+  gu16LDR_T_minus_0_Value = gu16LDR_T_minus_60_Value = 0xFFFF;
 }
 
 void main(void)
 {
+  bool bIsOffbyTimeOut = false;
+  uint16_t u16TimeOutInSecs;
+
   // Crystal Oscillator division factor: 64
   CLKPR=(1<<CLKPCE);
   CLKPR=(0<<CLKPCE) | (0<<CLKPS3) | (1<<CLKPS2) | (1<<CLKPS1) | (0<<CLKPS0);
@@ -159,49 +188,58 @@ void main(void)
   ADCSRB=(1<<ADTS2) | (0<<ADTS1) | (0<<ADTS0);
   ADCSRA=(1<<ADEN) | (0<<ADSC) | (1<<ADATE) | (0<<ADIF) | (1<<ADIE) | (0<<ADPS2) | (0<<ADPS1) | (1<<ADPS0);
 
+  #ifdef __CODEVISIONAVR__
+  
+  #else
+  set_sleep_mode(SLEEP_MODE_IDLE);
+  #endif
+
   while (1)
   {
-    #if 1
-    uint16_t u16TimeOutInSecs;
-    uint16_t u16LDRValue;
-    uint16_t u16CurrTime;
-    #endif
-
     #ifdef __CODEVISIONAVR__
-    #asm("sei")
-    /*sleep*/
     #asm("cli")
     #else
-    //set_sleep_mode(SLEEP_MODE_IDLE);
-    //sleep_enable();
-    //sleep_bod_disable();
-    //sei();
-    //sleep_cpu();
-    //sleep_disable();
-    //cli();
+    cli();
     #endif
 
-    #if 1
-      cli();
-      u16LDRValue = gu16LDRValue;
-      u16TimeOutInSecs = TIMEOUT_IN_SECS;
-      u16CurrTime = gu16CurrTimeInSecs;
-      sei();
-    #endif
-    
+    SIG_LEVEL_CHG sigState;    
+    int16_t sDiff = gu16LDR_T_minus_0_Value - gu16LDR_T_minus_60_Value;
+    u16TimeOutInSecs = TIMEOUT_IN_SECS;
+    if (sDiff >= INPUT_LDR_CHG_VALUE_POS)
+    {
+      sigState = Sig_Rising;
+    }
+    else if (sDiff <= INPUT_LDR_CHG_VALUE_NEG)
+    {
+      sigState = Sig_Falling;
+    }
+    else if ((gu16LDR_T_minus_0_Value == 0xFFFF) || (gu16LDR_T_minus_60_Value == 0xFFFF))
+    {
+      sigState = Sig_No_Chg;
+    }
+
     if ((PORTB & (1 << OUTPUT_PIN)) == 0) 
     {
-      if (u16LDRValue > INPUT_LDR_DARK_MAX)
+      if ((sigState == Sig_Rising) && (gu16LDR_Value > INPUT_LDR_DARK_MAX))
       {
         Output_State_On();
       }
     } 
     else
     {
-      if ((u16LDRValue < INPUT_LDR_BRIGHT_MIN) || (u16CurrTime >= u16TimeOutInSecs))
+      if (((sigState == Sig_Falling) && (gu16LDR_Value < INPUT_LDR_BRIGHT_MIN)) || (gu16CurrTimeInSecs >= u16TimeOutInSecs))
       {
         Output_State_Off();
       }
     }    
+
+    #ifdef __CODEVISIONAVR__
+    #asm("sei")
+    #else
+    sei();
+    //sleep_mode();
+    #endif
+
+    _delay_ms(1000);
   }
 }
